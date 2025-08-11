@@ -1,99 +1,157 @@
-/**
- * LLM Chat Application Template
- *
- * A simple chat application using Cloudflare Workers AI.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
- *
- * @license MIT
- */
-import { Env, ChatMessage } from "./types";
+// DeepSeek-only Worker using GitHub deploys.
+// Serves static UI from /public via env.ASSETS and proxies /api/chat to DeepSeek.
 
-// Model ID for Workers AI model
-// https://developers.cloudflare.com/workers-ai/models/
-const MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const SYS_PROMPT =
+  "You are a helpful, friendly assistant. Keep answers concise and accurate.";
 
-// Default system prompt
-const SYSTEM_PROMPT =
-  "You are a helpful, friendly assistant. Provide concise and accurate responses.";
+interface Env {
+  DEEPSEEK_API_KEY: string;
+  DEEPSEEK_MODEL?: string;      // e.g. "deepseek-chat"
+  ALLOWED_ORIGINS?: string;     // "*" or "https://site1.com,https://site2.com"
+  ASSETS: { fetch(req: Request): Promise<Response> }; // static assets binding
+}
+
+function cors(origin: string, allowed?: string) {
+  let allow = "*";
+  if (allowed && allowed !== "*") {
+    const list = allowed.split(",").map(s => s.trim());
+    allow = list.includes(origin) ? origin : list[0] || "*";
+  }
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  };
+}
+
+function okJSON(data: unknown, headers: Record<string, string> = {}) {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+  });
+}
+function badJSON(status: number, data: unknown, headers: Record<string, string> = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+  });
+}
+
+async function handleOptions(request: Request, env: Env) {
+  const origin = request.headers.get("Origin") || "*";
+  return new Response(null, { status: 204, headers: cors(origin, env.ALLOWED_ORIGINS) });
+}
+
+async function handleChat(request: Request, env: Env) {
+  const origin = request.headers.get("Origin") || "*";
+  const baseHeaders = cors(origin, env.ALLOWED_ORIGINS);
+
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return badJSON(400, { error: { message: "Invalid JSON body" } }, baseHeaders);
+  }
+
+  const {
+    messages = [],
+    model = env.DEEPSEEK_MODEL || "deepseek-chat",
+    stream = true,
+    temperature,
+    top_p,
+    max_tokens,
+    presence_penalty,
+    frequency_penalty,
+    stop,
+    response_format,
+  } = body || {};
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return badJSON(400, { error: { message: "messages[] is required" } }, baseHeaders);
+  }
+
+  const hasSystem = messages.some((m: any) => m.role === "system");
+  const finalMessages = hasSystem ? messages : [{ role: "system", content: SYS_PROMPT }, ...messages];
+
+  const payload: any = { model, messages: finalMessages, stream };
+  if (temperature !== undefined) payload.temperature = temperature;
+  if (top_p !== undefined) payload.top_p = top_p;
+  if (max_tokens !== undefined) payload.max_tokens = max_tokens;
+  if (presence_penalty !== undefined) payload.presence_penalty = presence_penalty;
+  if (frequency_penalty !== undefined) payload.frequency_penalty = frequency_penalty;
+  if (stop !== undefined) payload.stop = stop;
+  if (response_format !== undefined) payload.response_format = response_format;
+
+  // Prefer Authorization header (BYOK) else use Worker secret
+  const headerKey =
+    (request.headers.get("authorization") || request.headers.get("Authorization"))?.replace(/^[Bb]earer\s+/, "");
+  const apiKey = headerKey || env.DEEPSEEK_API_KEY;
+
+  if (!apiKey) return badJSON(401, { error: { message: "Missing DEEPSEEK_API_KEY" } }, baseHeaders);
+
+  const dsURL = "https://api.deepseek.com/v1/chat/completions";
+
+  const init = {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  } as RequestInit as RequestInit & { duplex: "half" };
+  (init as any).duplex = "half"; // enable streaming on Workers
+
+  const dsRes = await fetch(dsURL, init);
+
+  // Non-stream passthrough
+  if (!stream) {
+    const text = await dsRes.text();
+    return new Response(text, {
+      status: dsRes.status,
+      headers: {
+        "content-type": dsRes.headers.get("content-type") || "application/json; charset=utf-8",
+        ...baseHeaders,
+      },
+    });
+  }
+
+  // Stream (SSE) passthrough, or return error body if not ok
+  if (!dsRes.ok && dsRes.body) {
+    const text = await dsRes.text();
+    return new Response(text, {
+      status: dsRes.status,
+      headers: { "content-type": "application/json; charset=utf-8", ...baseHeaders },
+    });
+  }
+
+  return new Response(dsRes.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      ...baseHeaders,
+    },
+  });
+}
 
 export default {
-  /**
-   * Main request handler for the Worker
-   */
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Handle static assets (frontend)
+    if (request.method === "OPTIONS") return handleOptions(request, env);
+
+    // Serve your /public UI (index.html + chat.js) via ASSETS
     if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
       return env.ASSETS.fetch(request);
     }
 
-    // API Routes
-    if (url.pathname === "/api/chat") {
-      // Handle POST requests for chat
-      if (request.method === "POST") {
-        return handleChatRequest(request, env);
-      }
-
-      // Method not allowed for other request types
-      return new Response("Method not allowed", { status: 405 });
+    if (url.pathname === "/api/health") {
+      const origin = request.headers.get("Origin") || "*";
+      return okJSON({ ok: true, ts: Date.now() }, cors(origin, env.ALLOWED_ORIGINS));
     }
 
-    // Handle 404 for unmatched routes
+    if (url.pathname === "/api/chat" && request.method === "POST") {
+      return handleChat(request, env);
+    }
+
     return new Response("Not found", { status: 404 });
   },
-} satisfies ExportedHandler<Env>;
-
-/**
- * Handles chat API requests
- */
-async function handleChatRequest(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  try {
-    // Parse JSON request body
-    const { messages = [] } = (await request.json()) as {
-      messages: ChatMessage[];
-    };
-
-    // Add system prompt if not present
-    if (!messages.some((msg) => msg.role === "system")) {
-      messages.unshift({ role: "system", content: SYSTEM_PROMPT });
-    }
-
-    const response = await env.AI.run(
-      MODEL_ID,
-      {
-        messages,
-        max_tokens: 1024,
-      },
-      {
-        returnRawResponse: true,
-        // Uncomment to use AI Gateway
-        // gateway: {
-        //   id: "YOUR_GATEWAY_ID", // Replace with your AI Gateway ID
-        //   skipCache: false,      // Set to true to bypass cache
-        //   cacheTtl: 3600,        // Cache time-to-live in seconds
-        // },
-      },
-    );
-
-    // Return streaming response
-    return response;
-  } catch (error) {
-    console.error("Error processing chat request:", error);
-    return new Response(
-      JSON.stringify({ error: "Failed to process request" }),
-      {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      },
-    );
-  }
-}
+};
