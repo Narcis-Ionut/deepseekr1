@@ -1,13 +1,15 @@
-// src/index.ts — DeepSeek Reasoner + D1 storage (create chat, fetch chat, send message)
+// DeepSeek Reasoner + D1 chat storage (create/list/get/delete/send with streaming).
+// Serves static UI from /public via env.ASSETS.
 
-const SYS_PROMPT = "You are a helpful, friendly assistant. Keep answers concise and accurate.";
-const DS_MODEL = "deepseek-reasoner"; // hard-lock the model here
+const SYS_PROMPT =
+  "You are a helpful, friendly assistant. Keep answers concise and accurate.";
+const DS_MODEL = "deepseek-reasoner";
 
 interface Env {
   DEEPSEEK_API_KEY: string;
   ALLOWED_ORIGINS?: string;
   ASSETS: { fetch(req: Request): Promise<Response> };
-  DB: D1Database;
+  DB: D1Database; // D1 binding name must be DB
 }
 
 function cors(origin: string, allowed?: string) {
@@ -19,7 +21,7 @@ function cors(origin: string, allowed?: string) {
   return {
     "Access-Control-Allow-Origin": allow,
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   };
 }
 
@@ -41,8 +43,9 @@ async function handleOptions(request: Request, env: Env) {
   return new Response(null, { status: 204, headers: cors(origin, env.ALLOWED_ORIGINS) });
 }
 
-// --- D1 helpers ---
+// ---------------- D1 helpers ----------------
 async function createChat(env: Env, title?: string) {
+  if (!env.DB) throw new Error("D1 binding 'DB' missing");
   const chatId = crypto.randomUUID();
   const now = Date.now();
   await env.DB.prepare(
@@ -51,10 +54,15 @@ async function createChat(env: Env, title?: string) {
   return chatId;
 }
 
+async function chatExists(env: Env, chatId: string) {
+  const r = await env.DB.prepare("SELECT id FROM chats WHERE id = ?1").bind(chatId).first();
+  return !!r;
+}
+
 async function getMessages(env: Env, chatId: string, limit = 1000) {
   const res = await env.DB.prepare(
     "SELECT role, content, created_at FROM messages WHERE chat_id = ?1 ORDER BY created_at ASC LIMIT ?2"
-  ).bind(chatId, limit).all<{ role: string; content: string; created_at: number }>();
+  ).bind(chatId, limit).all<{ role: "system"|"user"|"assistant"; content: string; created_at: number }>();
   return res.results ?? [];
 }
 
@@ -65,23 +73,78 @@ async function insertMessage(env: Env, chatId: string, role: "system" | "user" |
   ).bind(chatId, role, content, now).run();
 }
 
-// --- Routes ---
+async function updateChatTitleIfEmpty(env: Env, chatId: string, fromText: string) {
+  const title = fromText.trim().slice(0, 48);
+  await env.DB.prepare(
+    "UPDATE chats SET title = COALESCE(NULLIF(title,''), ?2) WHERE id = ?1 AND (title IS NULL OR title = '')"
+  ).bind(chatId, title).run();
+}
+
+async function listChats(env: Env, limit = 100, offset = 0) {
+  // last activity = max(messages.created_at) or chats.created_at if none
+  const sql = `
+    SELECT
+      c.id,
+      COALESCE(NULLIF(c.title, ''), 'Untitled') AS title,
+      c.created_at,
+      COALESCE(MAX(m.created_at), c.created_at) AS last_activity,
+      COUNT(m.id) AS message_count
+    FROM chats c
+    LEFT JOIN messages m ON m.chat_id = c.id
+    GROUP BY c.id
+    ORDER BY last_activity DESC
+    LIMIT ?1 OFFSET ?2
+  `;
+  const res = await env.DB.prepare(sql).bind(limit, offset).all<{
+    id: string; title: string; created_at: number; last_activity: number; message_count: number;
+  }>();
+  return res.results ?? [];
+}
+
+async function deleteChat(env: Env, chatId: string) {
+  // Cascade may or may not be enforced; delete messages explicitly for safety
+  await env.DB.prepare("DELETE FROM messages WHERE chat_id = ?1").bind(chatId).run();
+  await env.DB.prepare("DELETE FROM chats WHERE id = ?1").bind(chatId).run();
+}
+
+// ---------------- Routes ----------------
 async function routeCreateChat(request: Request, env: Env) {
   const origin = request.headers.get("Origin") || "*";
-  let body: any = {};
-  try { body = await request.json(); } catch {}
-  const chatId = await createChat(env, body?.title);
-  return okJSON({ chat_id: chatId }, cors(origin, env.ALLOWED_ORIGINS));
+  try {
+    let body: any = {};
+    try { body = await request.json(); } catch {}
+    const chatId = await createChat(env, body?.title);
+    return okJSON({ chat_id: chatId }, cors(origin, env.ALLOWED_ORIGINS));
+  } catch (e: any) {
+    return badJSON(500, { error: { message: String(e?.message || e) } }, cors(origin, env.ALLOWED_ORIGINS));
+  }
+}
+
+async function routeListChats(request: Request, env: Env) {
+  const origin = request.headers.get("Origin") || "*";
+  const url = new URL(request.url);
+  const limit = Math.min(Number(url.searchParams.get("limit") || 100), 200);
+  const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
+  const rows = await listChats(env, limit, offset);
+  return okJSON({ data: rows }, cors(origin, env.ALLOWED_ORIGINS));
 }
 
 async function routeGetChat(request: Request, env: Env, chatId: string) {
   const origin = request.headers.get("Origin") || "*";
-  // Verify chat exists (optional)
-  const row = await env.DB.prepare("SELECT id FROM chats WHERE id = ?1").bind(chatId).first();
-  if (!row) return badJSON(404, { error: { message: "Chat not found" } }, cors(origin, env.ALLOWED_ORIGINS));
-
+  if (!(await chatExists(env, chatId))) {
+    return badJSON(404, { error: { message: "Chat not found" } }, cors(origin, env.ALLOWED_ORIGINS));
+  }
   const messages = await getMessages(env, chatId);
   return okJSON({ chat_id: chatId, messages }, cors(origin, env.ALLOWED_ORIGINS));
+}
+
+async function routeDeleteChat(request: Request, env: Env, chatId: string) {
+  const origin = request.headers.get("Origin") || "*";
+  if (!(await chatExists(env, chatId))) {
+    return badJSON(404, { error: { message: "Chat not found" } }, cors(origin, env.ALLOWED_ORIGINS));
+  }
+  await deleteChat(env, chatId);
+  return okJSON({ ok: true }, cors(origin, env.ALLOWED_ORIGINS));
 }
 
 async function routeChat(request: Request, env: Env) {
@@ -98,33 +161,24 @@ async function routeChat(request: Request, env: Env) {
 
   if (!chatId) return badJSON(400, { error: { message: "chat_id is required" } }, baseHeaders);
   if (!content) return badJSON(400, { error: { message: "content is required" } }, baseHeaders);
+  if (!(await chatExists(env, chatId))) return badJSON(404, { error: { message: "Chat not found" } }, baseHeaders);
 
-  // ensure chat exists
-  const chatExists = await env.DB.prepare("SELECT id FROM chats WHERE id = ?1").bind(chatId).first();
-  if (!chatExists) return badJSON(404, { error: { message: "Chat not found" } }, baseHeaders);
-
-  // Insert user message now
+  // Save user message
   await insertMessage(env, chatId, "user", content);
+  // Set chat title if empty (first user message)
+  await updateChatTitleIfEmpty(env, chatId, content);
 
-  // Build history from DB (last 30)
+  // Build recent history (last 30 messages) from DB
   const history = await getMessages(env, chatId, 1000);
   const last30 = history.slice(-30);
-  const finalMessages = [
-    { role: "system", content: SYS_PROMPT },
-    ...last30,
-    { role: "user", content },
-  ];
+  const finalMessages = [{ role: "system", content: SYS_PROMPT }, ...last30];
 
   const apiKey =
     (request.headers.get("authorization") || request.headers.get("Authorization"))?.replace(/^[Bb]earer\s+/, "") ||
     env.DEEPSEEK_API_KEY;
   if (!apiKey) return badJSON(401, { error: { message: "Missing DEEPSEEK_API_KEY" } }, baseHeaders);
 
-  const payload: any = {
-    model: DS_MODEL, // forced
-    messages: finalMessages,
-    stream,
-  };
+  const payload: any = { model: DS_MODEL, messages: finalMessages, stream };
 
   const init = {
     method: "POST",
@@ -137,7 +191,6 @@ async function routeChat(request: Request, env: Env) {
 
   if (!stream) {
     const text = await dsRes.text();
-    // Try to store assistant message from non-stream JSON
     try {
       const json = JSON.parse(text);
       const msg = json?.choices?.[0]?.message?.content;
@@ -154,7 +207,7 @@ async function routeChat(request: Request, env: Env) {
     return new Response(text, { status: dsRes.status, headers: { "content-type": "application/json; charset=utf-8", ...baseHeaders } });
   }
 
-  // Stream passthrough + capture content to store
+  // Stream passthrough + capture and SAVE BEFORE CLOSE + sentinel
   const reader = dsRes.body!.getReader();
   const sseHeaders = {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -165,21 +218,26 @@ async function routeChat(request: Request, env: Env) {
 
   let buffer = "";
   let assistant = "";
+  const encoder = new TextEncoder();
+
   const streamOut = new ReadableStream({
     async pull(controller) {
       const { value, done } = await reader.read();
       if (done) {
-        controller.close();
-        // store at end
+        // ✅ store before closing
         if (assistant.trim()) {
           await insertMessage(env, chatId, "assistant", assistant);
         }
+        // ✅ tell client storage is synced
+        controller.enqueue(encoder.encode(`data: {"__stored": true}\n\n`));
+        controller.close();
         return;
       }
-      // Push original bytes to client
+
+      // Pass through DeepSeek bytes
       controller.enqueue(value);
 
-      // Decode and parse SSE chunk for our own capture
+      // Capture SSE for our own save buffer
       const chunk = new TextDecoder().decode(value);
       buffer += chunk;
       const events = buffer.split("\n\n");
@@ -193,12 +251,9 @@ async function routeChat(request: Request, env: Env) {
           const j = JSON.parse(payload);
           const delta = j?.choices?.[0]?.delta?.content || "";
           if (delta) assistant += delta;
-        } catch { /* ignore non-JSON */ }
+        } catch {}
       }
     },
-    cancel() {
-      // no-op
-    }
   });
 
   return new Response(streamOut, { status: 200, headers: sseHeaders });
@@ -210,28 +265,31 @@ export default {
 
     if (request.method === "OPTIONS") return handleOptions(request, env);
 
-    // Static assets (your UI)
+    // Static UI
     if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
       return env.ASSETS.fetch(request);
     }
 
+    // Health
     if (url.pathname === "/api/health") {
       const origin = request.headers.get("Origin") || "*";
-      return okJSON({ ok: true, ts: Date.now(), model: DS_MODEL }, cors(origin, env.ALLOWED_ORIGINS));
+      return okJSON(
+        { ok: true, model: DS_MODEL, dbBound: !!env.DB },
+        cors(origin, env.ALLOWED_ORIGINS)
+      );
     }
 
-    if (url.pathname === "/api/chats" && request.method === "POST") {
-      return routeCreateChat(request, env);
-    }
+    // Chats collection
+    if (url.pathname === "/api/chats" && request.method === "POST") return routeCreateChat(request, env);
+    if (url.pathname === "/api/chats" && request.method === "GET")  return routeListChats(request, env);
 
-    const chatMatch = url.pathname.match(/^\/api\/chats\/([0-9a-fA-F-]+)$/);
-    if (chatMatch && request.method === "GET") {
-      return routeGetChat(request, env, chatMatch[1]);
-    }
+    // Single chat
+    const getMatch = url.pathname.match(/^\/api\/chats\/([0-9a-fA-F-]+)$/);
+    if (getMatch && request.method === "GET")    return routeGetChat(request, env, getMatch[1]);
+    if (getMatch && request.method === "DELETE") return routeDeleteChat(request, env, getMatch[1]);
 
-    if (url.pathname === "/api/chat" && request.method === "POST") {
-      return routeChat(request, env);
-    }
+    // Send message
+    if (url.pathname === "/api/chat" && request.method === "POST") return routeChat(request, env);
 
     return new Response("Not found", { status: 404 });
   },
