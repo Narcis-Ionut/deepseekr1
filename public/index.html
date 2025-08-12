@@ -20,18 +20,16 @@
       *{box-sizing:border-box;margin:0;padding:0}
       html,body{height:100%}
 
-      /* MOBILE FIX: use dynamic viewport height, allow inner scrolling */
+      /* MOBILE FIX: dynamic viewport height, inner panes scroll */
       body{
         font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif;
         background:var(--bg-primary); color:var(--text-primary);
-        height:100dvh; /* replaces buggy 100vh on mobile */
-        overflow:hidden; /* page itself doesn’t scroll; inner panes do */
-        position:relative;
+        height:100dvh; overflow:hidden; position:relative;
         -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
         -webkit-tap-highlight-color:transparent;
       }
 
-      /* Animated background */
+      /* Background */
       .bg-animation{position:fixed;inset:0;overflow:hidden;z-index:0;opacity:.35}
       .bg-animation::before{
         content:"";position:absolute;width:120%;height:120%;top:-10%;left:-10%;
@@ -44,9 +42,8 @@
       @keyframes bgMove{0%,100%{transform:rotate(0) scale(1)}50%{transform:rotate(180deg) scale(1.1)}}
 
       .container{
-        position:relative;z-index:1;
-        height:100dvh;max-width:1200px;margin:0 auto;
-        display:flex;flex-direction:column;min-height:0; /* allow children to shrink */
+        position:relative;z-index:1;height:100dvh;max-width:1200px;margin:0 auto;
+        display:flex;flex-direction:column;min-height:0;
       }
 
       /* Header */
@@ -56,7 +53,7 @@
         border-bottom:1px solid var(--glass-border);
         padding:calc(1rem + env(safe-area-inset-top,0px)) clamp(1rem,4vw,2rem) 1rem clamp(1rem,4vw,2rem);
         display:flex;align-items:center;justify-content:space-between;z-index:10;
-        position:sticky;top:0; /* MOBILE FIX: stick under URL bar */
+        position:sticky;top:0;
       }
       .logo{display:flex;align-items:center;gap:.75rem}
       .logo-icon{width:36px;height:36px;background:var(--accent);border-radius:10px;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;animation:pulse 2s ease-in-out infinite}
@@ -74,7 +71,6 @@
       .messages-container{
         flex:1;overflow:auto;padding:1.25rem clamp(1rem,4vw,2rem);
         scroll-behavior:smooth;-webkit-overflow-scrolling:touch;
-        /* keep last messages above the input on small screens */
         padding-bottom:clamp(5rem,12vh,9rem);
       }
       .messages-container::-webkit-scrollbar{width:6px}
@@ -116,8 +112,7 @@
       .input-area{
         background:var(--bg-secondary);border-top:1px solid var(--glass-border);
         padding:1rem clamp(1rem,4vw,2rem) calc(1rem + env(safe-area-inset-bottom,0px)) clamp(1rem,4vw,2rem);
-        position:sticky;bottom:0; /* MOBILE FIX: sticks above iOS toolbar */
-        z-index:5;
+        position:sticky;bottom:0;z-index:5;
       }
       .input-wrapper{display:flex;gap:1rem;align-items:flex-end;max-width:100%}
       .input-container{
@@ -151,7 +146,7 @@
       .send-btn:hover::before{transform:translateX(100%)}
       .send-btn:disabled{background:var(--border);cursor:not-allowed;transform:none;box-shadow:none}
 
-      /* Sidebar (hidden on mobile) */
+      /* Sidebar + Drawer */
       .sidebar{
         width:300px;background:var(--glass-bg);border-left:1px solid var(--glass-border);
         backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
@@ -173,9 +168,27 @@
       .stat-label{font-size:.8rem;color:var(--text-dim)}
       .stat-value{font-size:1.25rem;font-weight:600;background:linear-gradient(135deg,var(--text-primary) 0%,var(--accent-bright) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 
-      /* MOBILE TWEAKS */
-      @media (max-width: 900px){ .sidebar{display:none} }
-      @media (max-width: 640px){
+      /* Drawer controls */
+      .mobile-only { display: none; }
+      .sidebar-backdrop{
+        position: fixed; inset: 0; z-index: 49;
+        background: rgba(0,0,0,.45);
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+        display: none;
+      }
+      @media (max-width: 900px){
+        .mobile-only { display:flex; }
+        .sidebar{
+          position: fixed; top: 0; left: 0; z-index: 60;
+          height: 100dvh; width: min(92vw, 360px);
+          transform: translateX(-100%);
+          transition: transform .28s cubic-bezier(.4,0,.2,1);
+          padding-top: calc(env(safe-area-inset-top,0px) + 0.5rem);
+          padding-bottom: calc(env(safe-area-inset-bottom,0px) + 0.5rem);
+        }
+        .sidebar.open{ transform: translateX(0); }
+        .sidebar-backdrop.active{ display:block; }
+
         .logo-text{font-size:1.05rem}
         .message-wrapper{max-width:92%}
         header{backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
@@ -185,6 +198,10 @@
       .loading-bar{position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);transform:translateX(-100%);animation:loading 1.5s linear infinite;display:none}
       .loading-bar.active{display:block}
       @keyframes loading{to{transform:translateX(100%)}}
+      @keyframes messageSlide{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+      @keyframes typingPulse{0%,60%,100%{transform:scale(.7);opacity:.5}30%{transform:scale(1);opacity:1}}
+      @keyframes shimmer{0%,100%{transform:translateX(-100%)}50%{transform:translateX(100%)}}
+      @keyframes bgMove{0%,100%{transform:rotate(0) scale(1)}50%{transform:rotate(180deg) scale(1.1)}}
     </style>
   </head>
   <body>
@@ -197,24 +214,40 @@
           <div class="logo-text">Neural Chat</div>
         </div>
         <div class="header-actions">
+          <!-- NEW: Menu button for mobile -->
+          <button id="menu-btn" class="icon-btn mobile-only" title="Menu" aria-label="Menu">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="3" y1="6" x2="17" y2="6"></line>
+              <line x1="3" y1="12" x2="17" y2="12"></line>
+              <line x1="3" y1="18" x2="17" y2="18"></line>
+            </svg>
+          </button>
+
           <button id="new-chat-btn" class="icon-btn" title="New Chat" aria-label="New Chat">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
           </button>
           <button id="export-chat-btn" class="icon-btn" title="Export current chat" aria-label="Export current chat">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M14 2H6a2 2 0 0 0-2 2v12m12-4l-4 4m0-8l4 4m-4-4v8" />
             </svg>
           </button>
           <button id="clear-history-btn" class="icon-btn" title="New empty chat" aria-label="New empty chat">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 6h18M19 6l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
             </svg>
           </button>
         </div>
       </header>
+
+      <!-- Backdrop for mobile drawer -->
+      <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
 
       <div class="chat-area">
         <div class="chat-main">
@@ -247,14 +280,16 @@
                 <textarea id="user-input" placeholder="Ask anything..." rows="1" autofocus></textarea>
                 <div class="input-actions">
                   <button class="action-btn" title="Attach" aria-label="Attach">
-                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                       <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"></path>
                     </svg>
                   </button>
                 </div>
               </div>
               <button class="send-btn" id="send-btn" aria-label="Send">
-                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <line x1="22" y1="2" x2="11" y2="13"></line>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                 </svg>
@@ -293,18 +328,6 @@
         </aside>
       </div>
     </div>
-
-    <!-- Optional tiny auto-resize for the textarea (helps on iOS) -->
-    <script>
-      const ta = document.getElementById('user-input');
-      function autoresize(){
-        ta.style.height = 'auto';
-        ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight*0.35)) + 'px';
-      }
-      ['input','change'].forEach(e=>ta.addEventListener(e,autoresize));
-      window.addEventListener('resize',autoresize);
-      autoresize();
-    </script>
 
     <script src="/chat.js" defer></script>
   </body>
