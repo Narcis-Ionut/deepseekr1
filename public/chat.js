@@ -1,4 +1,4 @@
-// Neural Chat frontend — deepseek-reasoner + D1 storage + sidebar chat list
+// Neural ngi frontend — deepseek-reasoner + D1 storage + sidebar chat list
 
 const messagesEl = document.getElementById("messages-container");
 const inputEl = document.getElementById("user-input");
