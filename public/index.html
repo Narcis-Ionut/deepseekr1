@@ -600,6 +600,32 @@
           transform: translateX(100%);
         }
       }
+      /* Flex fixes so inner scroll works inside flex columns */
+.chat-area, .chat-main, .sidebar { min-height: 0; }
+.sidebar { display: flex; flex-direction: column; }
+
+/* Make the Chats section consume remaining height */
+#chats-section { 
+  flex: 1; 
+  min-height: 0; 
+  display: flex; 
+  flex-direction: column; 
+}
+
+/* Let just the chat list scroll; remove the old 45vh cap */
+#chat-list { 
+  flex: 1; 
+  min-height: 0; 
+  overflow-y: auto; 
+  max-height: none; 
+}
+
+/* Keep Occupation reasonable and independently scrollable if long */
+#agent-chooser { max-height: 30vh; overflow-y: auto; }
+
+/* Optional: avoid visual jumps when scrollbars appear */
+.sidebar, #chat-list { scrollbar-gutter: stable; }
+
     </style>
   </head>
   <body>
@@ -758,7 +784,7 @@
             </div>
           </div>
 
-          <div class="sidebar-section">
+          <div class="sidebar-section" id="chats-section">
             <div class="sidebar-title">Chats</div>
             <div id="chat-list" class="chat-list"></div>
           </div>
