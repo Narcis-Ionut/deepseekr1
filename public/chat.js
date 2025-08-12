@@ -1,16 +1,20 @@
 // Neural Chat frontend — deepseek-reasoner + D1 storage + sidebar chat list
 
-const messagesEl      = document.getElementById("messages-container");
-const inputEl         = document.getElementById("user-input");
-const sendBtn         = document.getElementById("send-btn");
-const typingEl        = document.getElementById("typing-indicator");
-const loadingBar      = document.getElementById("loading-bar");
-const newChatBtn      = document.getElementById("new-chat-btn");
+const messagesEl = document.getElementById("messages-container");
+const inputEl = document.getElementById("user-input");
+const sendBtn = document.getElementById("send-btn");
+const typingEl = document.getElementById("typing-indicator");
+const loadingBar = document.getElementById("loading-bar");
+const newChatBtn = document.getElementById("new-chat-btn");
 const clearHistoryBtn = document.getElementById("clear-history-btn");
-const exportChatBtn   = document.getElementById("export-chat-btn");
-const msgCountEl      = document.getElementById("message-count");
-const tokenCountEl    = document.getElementById("token-count");
-const chatListEl      = document.getElementById("chat-list");
+const exportChatBtn = document.getElementById("export-chat-btn");
+const msgCountEl = document.getElementById("message-count");
+const tokenCountEl = document.getElementById("token-count");
+const chatListEl = document.getElementById("chat-list");
+
+// Occupations (agents)
+const agentChooserEl = document.getElementById("agent-chooser");
+let currentAgent = "general";
 
 let chatId = null;
 let sending = false;
@@ -28,7 +32,10 @@ let estTokens = 0;
     await loadChat(chatId);
     highlightActiveChat(chatId);
   } catch (e) {
-    addBubble("assistant", "❌ Could not create or load chat (storage not ready).");
+    addBubble(
+      "assistant",
+      "❌ Could not create or load chat (storage not ready)."
+    );
     console.error(e);
     sendBtn.disabled = true;
     inputEl.disabled = true;
@@ -40,7 +47,8 @@ async function createChat(title) {
   const res = await fetch("/api/chats", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: title || null }),
+    // ✅ send the selected agent when creating a chat
+    body: JSON.stringify({ title: title || null, agent: currentAgent }),
   });
   if (!res.ok) throw new Error("Failed to create chat");
   const json = await res.json();
@@ -51,6 +59,11 @@ async function loadChat(id) {
   const res = await fetch(`/api/chats/${id}`);
   if (!res.ok) throw new Error("Failed to load chat");
   const json = await res.json();
+
+  // ✅ keep UI and state in sync with the chat's saved agent
+  currentAgent = json.agent || "general";
+  highlightAgent(currentAgent);
+
   renderMessages(json.messages || []);
   highlightActiveChat(id);
 }
@@ -74,7 +87,10 @@ inputEl.addEventListener("input", function () {
 });
 sendBtn.addEventListener("click", onSend);
 inputEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); }
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    onSend();
+  }
 });
 
 newChatBtn?.addEventListener("click", onNewChat);
@@ -83,10 +99,14 @@ exportChatBtn?.addEventListener("click", async () => {
   const res = await fetch(`/api/chats/${chatId}`);
   if (!res.ok) return;
   const data = await res.json();
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = `neural-chat-${chatId}.json`; a.click();
+  a.href = url;
+  a.download = `neural-chat-${chatId}.json`;
+  a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
@@ -127,6 +147,14 @@ chatListEl.addEventListener("click", async (e) => {
   }
 });
 
+// ✅ occupation picker: choose which agent is used for the next "New Chat"
+agentChooserEl?.addEventListener("click", (e) => {
+  const item = e.target.closest(".chat-item.agent");
+  if (!item) return;
+  currentAgent = item.dataset.agent || "general";
+  highlightAgent(currentAgent);
+});
+
 // ------- actions -------
 async function onNewChat() {
   chatId = await createChat();
@@ -146,7 +174,8 @@ async function onSend() {
   loadingBar.classList.add("active");
 
   addBubble("user", text);
-  inputEl.value = ""; inputEl.style.height = "auto";
+  inputEl.value = "";
+  inputEl.style.height = "auto";
 
   const assistantNode = addBubble("assistant", "");
   let full = "";
@@ -184,9 +213,15 @@ async function onSend() {
 
         try {
           const j = JSON.parse(payload);
-          if (j && j.__stored) { stored = true; continue; } // ✅ server sentinel
+          if (j && j.__stored) {
+            stored = true;
+            continue;
+          } // ✅ server sentinel
           const delta = j?.choices?.[0]?.delta?.content || "";
-          if (delta) { full += delta; appendText(assistantNode, delta); }
+          if (delta) {
+            full += delta;
+            appendText(assistantNode, delta);
+          }
         } catch {}
       }
     }
@@ -195,10 +230,9 @@ async function onSend() {
     if (stored) {
       await loadChat(chatId);
     } else {
-      setTimeout(() => loadChat(chatId).catch(()=>{}), 300);
+      setTimeout(() => loadChat(chatId).catch(() => {}), 300);
     }
     await refreshChats();
-
   } catch (e) {
     appendText(assistantNode, `\n❌ Network error: ${e.message}`);
   } finally {
@@ -259,6 +293,14 @@ function highlightActiveChat(id) {
   });
 }
 
+// ✅ helper to highlight the selected occupation in the sidebar
+function highlightAgent(agent) {
+  if (!agentChooserEl) return;
+  [...agentChooserEl.querySelectorAll(".chat-item.agent")].forEach((n) => {
+    n.classList.toggle("active", n.dataset.agent === agent);
+  });
+}
+
 function addBubble(role, text) {
   const wrap = document.createElement("div");
   wrap.className = `message ${role}`;
@@ -288,7 +330,10 @@ function addBubble(role, text) {
   const words = (text || "").split(/\s+/).filter(Boolean).length;
   estTokens += Math.max(1, Math.round(words * 1.3));
   tokenCountEl && (tokenCountEl.textContent = String(estTokens));
-  msgCountEl && (msgCountEl.textContent = String((Number(msgCountEl.textContent)||0)+1));
+  msgCountEl &&
+    (msgCountEl.textContent = String(
+      (Number(msgCountEl.textContent) || 0) + 1
+    ));
 
   return textEl;
 }
