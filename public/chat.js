@@ -1,5 +1,6 @@
-// Neural ngi frontend — deepseek-reasoner + D1 storage + sidebar chat list
+// Neural NGI frontend — deepseek-reasoner + D1 storage + sidebar chat list + mobile drawer
 
+// ------- DOM -------
 const messagesEl = document.getElementById("messages-container");
 const inputEl = document.getElementById("user-input");
 const sendBtn = document.getElementById("send-btn");
@@ -11,14 +12,34 @@ const exportChatBtn = document.getElementById("export-chat-btn");
 const msgCountEl = document.getElementById("message-count");
 const tokenCountEl = document.getElementById("token-count");
 const chatListEl = document.getElementById("chat-list");
-
-// Occupations (agents)
 const agentChooserEl = document.getElementById("agent-chooser");
-let currentAgent = "general";
 
+// Drawer elements
+const menuBtn = document.getElementById("menu-btn");
+const sidebar = document.querySelector(".sidebar");
+const sidebarBackdrop = document.getElementById("sidebar-backdrop");
+
+// ------- state -------
+let currentAgent = "general";
 let chatId = null;
 let sending = false;
 let estTokens = 0;
+
+// ------- drawer helpers -------
+function openDrawer(){ sidebar?.classList.add("open"); sidebarBackdrop?.classList.add("active"); }
+function closeDrawer(){ sidebar?.classList.remove("open"); sidebarBackdrop?.classList.remove("active"); }
+function toggleDrawer(){ sidebar?.classList.toggle("open"); sidebarBackdrop?.classList.toggle("active"); }
+function isMobile(){ return window.matchMedia("(max-width: 900px)").matches; }
+
+// ------- textarea autoresize (mobile-friendly) -------
+function autoResize(){
+  if (!inputEl) return;
+  inputEl.style.height = "auto";
+  const maxH = Math.round(window.innerHeight * 0.35); // cap ~35% of viewport
+  inputEl.style.height = Math.min(inputEl.scrollHeight, maxH) + "px";
+}
+["input","change"].forEach(evt => inputEl?.addEventListener(evt, autoResize));
+window.addEventListener("resize", autoResize);
 
 // ------- init -------
 (async function init() {
@@ -31,14 +52,12 @@ let estTokens = 0;
     await refreshChats();
     await loadChat(chatId);
     highlightActiveChat(chatId);
+    autoResize();
   } catch (e) {
-    addBubble(
-      "assistant",
-      "❌ Could not create or load chat (storage not ready)."
-    );
+    addBubble("assistant", "❌ Could not create or load chat (storage not ready).");
     console.error(e);
-    sendBtn.disabled = true;
-    inputEl.disabled = true;
+    sendBtn && (sendBtn.disabled = true);
+    inputEl && (inputEl.disabled = true);
   }
 })();
 
@@ -47,7 +66,6 @@ async function createChat(title) {
   const res = await fetch("/api/chats", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    // ✅ send the selected agent when creating a chat
     body: JSON.stringify({ title: title || null, agent: currentAgent }),
   });
   if (!res.ok) throw new Error("Failed to create chat");
@@ -60,7 +78,6 @@ async function loadChat(id) {
   if (!res.ok) throw new Error("Failed to load chat");
   const json = await res.json();
 
-  // ✅ keep UI and state in sync with the chat's saved agent
   currentAgent = json.agent || "general";
   highlightAgent(currentAgent);
 
@@ -81,49 +98,44 @@ async function deleteChat(id) {
 }
 
 // ------- UI wiring -------
-inputEl.addEventListener("input", function () {
-  this.style.height = "auto";
-  this.style.height = Math.min(this.scrollHeight, 120) + "px";
-});
-sendBtn.addEventListener("click", onSend);
-inputEl.addEventListener("keydown", (e) => {
+sendBtn?.addEventListener("click", onSend);
+inputEl?.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     onSend();
   }
 });
-
 newChatBtn?.addEventListener("click", onNewChat);
 clearHistoryBtn?.addEventListener("click", onNewChat);
 exportChatBtn?.addEventListener("click", async () => {
   const res = await fetch(`/api/chats/${chatId}`);
   if (!res.ok) return;
   const data = await res.json();
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
-  a.download = `neural-chat-${chatId}.json`;
-  a.click();
+  a.href = url; a.download = `neural-chat-${chatId}.json`; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-chatListEl.addEventListener("click", async (e) => {
+// Drawer events
+menuBtn?.addEventListener("click", toggleDrawer);
+sidebarBackdrop?.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+// Sidebar: chat list click (switch/delete)
+chatListEl?.addEventListener("click", async (e) => {
   const item = e.target.closest(".chat-item");
   if (!item) return;
-
   const id = item.dataset.id;
 
-  // delete button?
+  // delete?
   if (e.target.closest(".icon.delete")) {
     const confirmDelete = confirm("Delete this chat?");
     if (!confirmDelete) return;
     try {
       await deleteChat(id);
       if (id === chatId) {
-        // switch to a new chat
         chatId = await createChat();
         localStorage.setItem("neural_chat_id", chatId);
         await refreshChats();
@@ -132,9 +144,8 @@ chatListEl.addEventListener("click", async (e) => {
         await refreshChats();
         highlightActiveChat(chatId);
       }
-    } catch (err) {
-      console.error(err);
-    }
+      if (isMobile()) closeDrawer();
+    } catch (err) { console.error(err); }
     return;
   }
 
@@ -144,15 +155,17 @@ chatListEl.addEventListener("click", async (e) => {
     localStorage.setItem("neural_chat_id", chatId);
     await loadChat(chatId);
     highlightActiveChat(chatId);
+    if (isMobile()) closeDrawer();
   }
 });
 
-// ✅ occupation picker: choose which agent is used for the next "New Chat"
+// Sidebar: occupation picker
 agentChooserEl?.addEventListener("click", (e) => {
   const item = e.target.closest(".chat-item.agent");
   if (!item) return;
   currentAgent = item.dataset.agent || "general";
   highlightAgent(currentAgent);
+  if (isMobile()) closeDrawer();
 });
 
 // ------- actions -------
@@ -175,7 +188,7 @@ async function onSend() {
 
   addBubble("user", text);
   inputEl.value = "";
-  inputEl.style.height = "auto";
+  autoResize();
 
   const assistantNode = addBubble("assistant", "");
   let full = "";
@@ -213,20 +226,16 @@ async function onSend() {
 
         try {
           const j = JSON.parse(payload);
-          if (j && j.__stored) {
-            stored = true;
-            continue;
-          } // ✅ server sentinel
+          if (j && j.__stored) { stored = true; continue; }
           const delta = j?.choices?.[0]?.delta?.content || "";
           if (delta) {
             full += delta;
             appendText(assistantNode, delta);
           }
-        } catch {}
+        } catch { /* ignore partials */ }
       }
     }
 
-    // Reload after storage confirmed (or fallback slight delay)
     if (stored) {
       await loadChat(chatId);
     } else {
@@ -293,7 +302,6 @@ function highlightActiveChat(id) {
   });
 }
 
-// ✅ helper to highlight the selected occupation in the sidebar
 function highlightAgent(agent) {
   if (!agentChooserEl) return;
   [...agentChooserEl.querySelectorAll(".chat-item.agent")].forEach((n) => {
@@ -331,9 +339,7 @@ function addBubble(role, text) {
   estTokens += Math.max(1, Math.round(words * 1.3));
   tokenCountEl && (tokenCountEl.textContent = String(estTokens));
   msgCountEl &&
-    (msgCountEl.textContent = String(
-      (Number(msgCountEl.textContent) || 0) + 1
-    ));
+    (msgCountEl.textContent = String((Number(msgCountEl.textContent) || 0) + 1));
 
   return textEl;
 }
