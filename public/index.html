@@ -625,6 +625,19 @@
 
 /* Optional: avoid visual jumps when scrollbars appear */
 .sidebar, #chat-list { scrollbar-gutter: stable; }
+      /* Let the left sidebar scroll as a single column */
+.chat-area, .chat-main, .sidebar { min-height: 0; } /* flex fix */
+.sidebar { overflow-y: auto; }
+
+/* Avoid nested scrollbars fighting with the sidebar */
+.chat-list { max-height: none; }
+
+/* Slight cap so Occupation doesn't eat the sidebar */
+#agent-chooser { max-height: 30vh; overflow-y: auto; }
+
+/* Stable scrollbar width, no layout jank */
+.sidebar, #chat-list { scrollbar-gutter: stable; }
+
 
     </style>
   </head>
